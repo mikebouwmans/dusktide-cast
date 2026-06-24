@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NoiseMixer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #111113;
+      color: #F5F5F5;
+      font-family: system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 24px;
+    }
+    #app-name {
+      font-size: 48px;
+      font-weight: 700;
+      letter-spacing: -1px;
+      color: #E8A027;
+    }
+    #channels {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 800px;
+    }
+    .channel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      opacity: 0.3;
+      transition: opacity 0.3s;
+    }
+    .channel.active { opacity: 1; }
+    .channel-name {
+      font-size: 13px;
+      color: #8E8E93;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .channel-bar {
+      width: 6px;
+      height: 48px;
+      background: #2C2C2E;
+      border-radius: 3px;
+      overflow: hidden;
+      position: relative;
+    }
+    .channel-fill {
+      position: absolute;
+      bottom: 0;
+      width: 100%;
+      background: #E8A027;
+      border-radius: 3px;
+      transition: height 0.1s;
+    }
+    #status {
+      font-size: 16px;
+      color: #8E8E93;
+      margin-top: 8px;
+    }
+  </style>
+  <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+</head>
+<body>
+  <div id="app-name">NoiseMixer</div>
+  <div id="channels"></div>
+  <div id="status">Wachten op verbinding…</div>
+
+  <script>
+    const NAMESPACE = 'urn:x-cast:com.mikebouwmans.noisemixer';
+    const BASE_URL = 'https://mikebouwmans.github.io/noisemixer-cast/sounds/';
+    const SOUND_IDS = ['white-noise', 'pink-noise', 'brown-noise', 'rain', 'ocean', 'fan', 'forest'];
+
+    // --- Audio engine ---
+    const audioCtx = new AudioContext();
+    const masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+    masterGain.connect(audioCtx.destination);
+
+    const gains = {}; // soundTypeId → GainNode
+
+    async function loadSounds() {
+      await Promise.all(SOUND_IDS.map(async (id) => {
+        try {
+          const res = await fetch(BASE_URL + id + '.mp3');
+          const ab = await res.arrayBuffer();
+          const buffer = await audioCtx.decodeAudioData(ab);
+
+          const gain = audioCtx.createGain();
+          gain.gain.value = 0;
+          gain.connect(masterGain);
+          gains[id] = gain;
+
+          const source = audioCtx.createBufferSource();
+          source.buffer = buffer;
+          source.loop = true;
+          source.connect(gain);
+          source.start(0);
+        } catch (e) {
+          console.warn('Kon geluid niet laden:', id, e);
+        }
+      }));
+    }
+
+    // --- UI ---
+    const channelsEl = document.getElementById('channels');
+    const statusEl = document.getElementById('status');
+    const channelEls = {};
+
+    function renderChannels(channels) {
+      channelsEl.innerHTML = '';
+      for (const ch of channels) {
+        const el = document.createElement('div');
+        el.className = 'channel';
+        el.innerHTML = `
+          <div class="channel-bar"><div class="channel-fill" style="height:0%"></div></div>
+          <div class="channel-name">${ch.soundTypeId.replace('-', ' ')}</div>
+        `;
+        channelEls[ch.soundTypeId] = el;
+        channelsEl.appendChild(el);
+      }
+    }
+
+    function updateChannelUI(soundTypeId, effectiveVolume) {
+      const el = channelEls[soundTypeId];
+      if (!el) return;
+      el.classList.toggle('active', effectiveVolume > 0);
+      el.querySelector('.channel-fill').style.height = (effectiveVolume * 100) + '%';
+    }
+
+    // --- Message handlers ---
+    function handleSync(data) {
+      renderChannels(data.channels);
+      masterGain.gain.value = data.isPlaying ? 1 : 0;
+
+      for (const ch of data.channels) {
+        const vol = ch.muted ? 0 : ch.volume;
+        const gain = gains[ch.soundTypeId];
+        if (gain) gain.gain.value = vol;
+        updateChannelUI(ch.soundTypeId, vol);
+      }
+
+      statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
+    }
+
+    function handleVolume(data) {
+      const gain = gains[data.soundTypeId];
+      if (gain) gain.gain.value = data.effectiveVolume;
+      updateChannelUI(data.soundTypeId, data.effectiveVolume);
+    }
+
+    function handlePlayState(data) {
+      masterGain.gain.value = data.isPlaying ? 1 : 0;
+      statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
+    }
+
+    // --- Cast SDK ---
+    const castContext = cast.framework.CastReceiverContext.getInstance();
+
+    castContext.addCustomMessageListener(NAMESPACE, (event) => {
+      const msg = event.data;
+      if (msg.type === 'SYNC') handleSync(msg);
+      else if (msg.type === 'VOLUME') handleVolume(msg);
+      else if (msg.type === 'PLAY_STATE') handlePlayState(msg);
+    });
+
+    // Start Cast receiver immediately, load sounds in parallel
+    castContext.start({ disableIdleTimeout: true });
+    loadSounds();
+  </script>
+</body>
+</html>
