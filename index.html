@@ -17,64 +17,21 @@
       height: 100vh;
       gap: 24px;
     }
-    #app-name {
-      font-size: 48px;
-      font-weight: 700;
-      letter-spacing: -1px;
-      color: #E8A027;
-    }
-    #channels {
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      justify-content: center;
-      max-width: 800px;
-    }
-    .channel {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-      opacity: 0.3;
-      transition: opacity 0.3s;
-    }
+    #app-name { font-size: 48px; font-weight: 700; letter-spacing: -1px; color: #E8A027; }
+    #channels { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; max-width: 800px; }
+    .channel { display: flex; flex-direction: column; align-items: center; gap: 8px; opacity: 0.3; transition: opacity 0.3s; }
     .channel.active { opacity: 1; }
-    .channel-name {
-      font-size: 13px;
-      color: #8E8E93;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-    .channel-bar {
-      width: 6px;
-      height: 48px;
-      background: #2C2C2E;
-      border-radius: 3px;
-      overflow: hidden;
-      position: relative;
-    }
-    .channel-fill {
-      position: absolute;
-      bottom: 0;
-      width: 100%;
-      background: #E8A027;
-      border-radius: 3px;
-      transition: height 0.1s;
-    }
-    #status {
-      font-size: 20px;
-      color: #E8A027;
-      margin-top: 8px;
-      text-align: center;
-      max-width: 700px;
-    }
+    .channel-name { font-size: 13px; color: #8E8E93; text-transform: uppercase; letter-spacing: 1px; }
+    .channel-bar { width: 6px; height: 48px; background: #2C2C2E; border-radius: 3px; overflow: hidden; position: relative; }
+    .channel-fill { position: absolute; bottom: 0; width: 100%; background: #E8A027; border-radius: 3px; transition: height 0.1s; }
+    #status { font-size: 20px; color: #E8A027; margin-top: 8px; text-align: center; max-width: 700px; }
   </style>
   <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
 </head>
 <body>
   <div id="app-name">NoiseMixer</div>
   <div id="channels"></div>
-  <div id="status">Opstarten…</div>
+  <div id="status">Verbinden…</div>
 
   <script>
     const NAMESPACE = 'urn:x-cast:com.rewaive.dusktide';
@@ -82,127 +39,97 @@
 
     const statusEl = document.getElementById('status');
     const channelsEl = document.getElementById('channels');
-    const channelEls = {};
 
     function log(msg) {
       statusEl.textContent = msg;
       console.log('[NoiseMixer]', msg);
     }
 
-    // Wrap everything so a crash shows on screen instead of leaving a blank page
-    try {
-      // --- Audio engine ---
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const masterGain = audioCtx.createGain();
-      masterGain.gain.value = 0;
-      masterGain.connect(audioCtx.destination);
+    // Register listener and start receiver FIRST — before any audio setup.
+    // This ensures castContext.start() is called within the Chromecast timeout.
+    const castContext = cast.framework.CastReceiverContext.getInstance();
 
-      const gains = {};
-      const sources = {};
-      const buffers = {};
-      let lastSync = null;
+    castContext.addCustomMessageListener(NAMESPACE, (event) => {
+      handleMessage(event.data);
+    });
 
-      async function loadSound(id) {
-        if (buffers[id]) return; // already loaded
-        const res = await fetch(BASE_URL + id + '.mp3');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const ab = await res.arrayBuffer();
-        const buffer = await audioCtx.decodeAudioData(ab);
+    castContext.start({ disableIdleTimeout: true });
+    log('Verbonden. Wachten op SYNC…');
 
-        const gain = audioCtx.createGain();
-        gain.gain.value = 0;
-        gain.connect(masterGain);
-        gains[id] = gain;
-        buffers[id] = buffer;
+    // --- Audio (set up after start()) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+    masterGain.connect(audioCtx.destination);
 
-        const source = audioCtx.createBufferSource();
-        source.buffer = buffer;
-        source.loop = true;
-        source.connect(gain);
-        source.start(0);
-        sources[id] = source;
+    const gains = {};
+    const buffers = {};
+    const channelEls = {};
+
+    async function loadSound(id) {
+      if (buffers[id]) return;
+      const res = await fetch(BASE_URL + id + '.mp3');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const ab = await res.arrayBuffer();
+      buffers[id] = await audioCtx.decodeAudioData(ab);
+
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      gain.connect(masterGain);
+      gains[id] = gain;
+
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffers[id];
+      src.loop = true;
+      src.connect(gain);
+      src.start(0);
+    }
+
+    function renderChannels(channels) {
+      channelsEl.innerHTML = '';
+      for (const ch of channels) {
+        const el = document.createElement('div');
+        el.className = 'channel';
+        el.innerHTML = `<div class="channel-bar"><div class="channel-fill" style="height:0%"></div></div><div class="channel-name">${ch.soundTypeId.replace(/-/g, ' ')}</div>`;
+        channelEls[ch.soundTypeId] = el;
+        channelsEl.appendChild(el);
+      }
+    }
+
+    function setChannelVol(id, vol) {
+      if (gains[id]) gains[id].gain.value = vol;
+      const el = channelEls[id];
+      if (!el) return;
+      el.classList.toggle('active', vol > 0);
+      el.querySelector('.channel-fill').style.height = (vol * 100) + '%';
+    }
+
+    async function handleSync(data) {
+      log('SYNC ontvangen…');
+      renderChannels(data.channels);
+      await audioCtx.resume();
+      masterGain.gain.value = data.isPlaying ? 1 : 0;
+
+      for (const ch of data.channels) {
+        const vol = ch.muted ? 0 : ch.volume;
+        loadSound(ch.soundTypeId)
+          .then(() => setChannelVol(ch.soundTypeId, vol))
+          .catch((e) => log('Geluid niet geladen: ' + ch.soundTypeId + ' — ' + e.message));
       }
 
-      // --- UI ---
-      function renderChannels(channels) {
-        channelsEl.innerHTML = '';
-        for (const ch of channels) {
-          const el = document.createElement('div');
-          el.className = 'channel';
-          el.innerHTML = `
-            <div class="channel-bar"><div class="channel-fill" style="height:0%"></div></div>
-            <div class="channel-name">${ch.soundTypeId.replace(/-/g, ' ')}</div>
-          `;
-          channelEls[ch.soundTypeId] = el;
-          channelsEl.appendChild(el);
-        }
-      }
+      log(data.isPlaying ? 'Speelt af' : 'Gepauzeerd');
+    }
 
-      function updateChannelUI(soundTypeId, vol) {
-        const el = channelEls[soundTypeId];
-        if (!el) return;
-        el.classList.toggle('active', vol > 0);
-        el.querySelector('.channel-fill').style.height = (vol * 100) + '%';
-      }
-
-      // --- Message handlers ---
-      async function handleSync(data) {
-        lastSync = data;
-        log(`SYNC: ${data.channels.length} kanalen, isPlaying=${data.isPlaying}`);
-        renderChannels(data.channels);
-
-        await audioCtx.resume();
-        masterGain.gain.value = data.isPlaying ? 1 : 0;
-
-        await Promise.all(data.channels.map(async (ch) => {
-          try {
-            await loadSound(ch.soundTypeId);
-          } catch (e) {
-            console.warn('Geluid niet beschikbaar:', ch.soundTypeId, e.message);
-          }
-          const vol = ch.muted ? 0 : ch.volume;
-          if (gains[ch.soundTypeId]) gains[ch.soundTypeId].gain.value = vol;
-          updateChannelUI(ch.soundTypeId, vol);
-        }));
-
-        statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
-      }
-
-      function handleVolume(data) {
-        if (gains[data.soundTypeId]) gains[data.soundTypeId].gain.value = data.effectiveVolume;
-        updateChannelUI(data.soundTypeId, data.effectiveVolume);
-      }
-
-      function handlePlayState(data) {
+    function handleMessage(msg) {
+      if (msg.type === 'SYNC') handleSync(msg);
+      else if (msg.type === 'VOLUME') {
+        const vol = msg.effectiveVolume;
+        setChannelVol(msg.soundTypeId, vol);
+      } else if (msg.type === 'PLAY_STATE') {
         audioCtx.resume();
-        masterGain.gain.value = data.isPlaying ? 1 : 0;
-        statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
+        masterGain.gain.value = msg.isPlaying ? 1 : 0;
+        log(msg.isPlaying ? 'Speelt af' : 'Gepauzeerd');
       }
-
-      // --- Cast SDK ---
-      const castContext = cast.framework.CastReceiverContext.getInstance();
-
-      castContext.addEventListener(
-        cast.framework.system.EventType.SENDER_CONNECTED,
-        () => {
-          log('Sender verbonden, wachten op SYNC…');
-          audioCtx.resume();
-        }
-      );
-
-      castContext.addCustomMessageListener(NAMESPACE, (event) => {
-        const msg = event.data;
-        if (msg.type === 'SYNC') handleSync(msg);
-        else if (msg.type === 'VOLUME') handleVolume(msg);
-        else if (msg.type === 'PLAY_STATE') handlePlayState(msg);
-      });
-
-      castContext.start({ disableIdleTimeout: true });
-      log('Receiver actief. Wachten op verbinding…');
-
-    } catch (err) {
-      log('FOUT: ' + err.message);
-      console.error(err);
     }
   </script>
 </body>
