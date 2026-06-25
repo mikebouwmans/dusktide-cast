@@ -172,11 +172,25 @@
       statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
     }
 
+    function log(msg) {
+      statusEl.textContent = msg;
+      console.log('[NoiseMixer]', msg);
+    }
+
     // --- Cast SDK ---
     const castContext = cast.framework.CastReceiverContext.getInstance();
 
+    castContext.addEventListener(
+      cast.framework.system.EventType.SENDER_CONNECTED,
+      () => {
+        log('Sender verbonden — AudioContext resuming…');
+        audioCtx.resume().then(() => log('AudioContext actief. Wachten op SYNC…'));
+      }
+    );
+
     castContext.addCustomMessageListener(NAMESPACE, (event) => {
       const msg = event.data;
+      log(`Bericht: ${msg.type}`);
       if (msg.type === 'SYNC') handleSync(msg);
       else if (msg.type === 'VOLUME') handleVolume(msg);
       else if (msg.type === 'PLAY_STATE') handlePlayState(msg);
@@ -184,7 +198,8 @@
 
     // Start Cast receiver immediately, load sounds in parallel
     castContext.start({ disableIdleTimeout: true });
-    loadSounds();
+    log('Receiver gestart. Geluiden laden…');
+    loadSounds().then(() => log('Geluiden geladen. Wachten op verbinding…'));
   </script>
 </body>
 </html>
