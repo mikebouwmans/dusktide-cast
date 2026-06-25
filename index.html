@@ -86,6 +86,7 @@
     masterGain.connect(audioCtx.destination);
 
     const gains = {}; // soundTypeId → GainNode
+    let lastSync = null; // last SYNC payload, used to init gains as sounds load
 
     async function loadSounds() {
       await Promise.all(SOUND_IDS.map(async (id) => {
@@ -95,7 +96,13 @@
           const buffer = await audioCtx.decodeAudioData(ab);
 
           const gain = audioCtx.createGain();
-          gain.gain.value = 0;
+          // Apply volume from the last SYNC if it arrived before this sound loaded.
+          if (lastSync) {
+            const ch = lastSync.channels.find(c => c.soundTypeId === id);
+            gain.gain.value = ch ? (ch.muted ? 0 : ch.volume) : 0;
+          } else {
+            gain.gain.value = 0;
+          }
           gain.connect(masterGain);
           gains[id] = gain;
 
@@ -138,7 +145,9 @@
 
     // --- Message handlers ---
     function handleSync(data) {
+      lastSync = data;
       renderChannels(data.channels);
+      audioCtx.resume();
       masterGain.gain.value = data.isPlaying ? 1 : 0;
 
       for (const ch of data.channels) {
@@ -158,6 +167,7 @@
     }
 
     function handlePlayState(data) {
+      audioCtx.resume();
       masterGain.gain.value = data.isPlaying ? 1 : 0;
       statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
     }
