@@ -62,9 +62,11 @@
       transition: height 0.1s;
     }
     #status {
-      font-size: 16px;
-      color: #8E8E93;
+      font-size: 20px;
+      color: #E8A027;
       margin-top: 8px;
+      text-align: center;
+      max-width: 700px;
     }
   </style>
   <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
@@ -72,134 +74,136 @@
 <body>
   <div id="app-name">NoiseMixer</div>
   <div id="channels"></div>
-  <div id="status">Wachten op verbinding…</div>
+  <div id="status">Opstarten…</div>
 
   <script>
     const NAMESPACE = 'urn:x-cast:com.rewaive.dusktide';
     const BASE_URL = 'https://mikebouwmans.github.io/dusktide-cast/sounds/';
-    const SOUND_IDS = ['white-noise', 'pink-noise', 'brown-noise', 'rain', 'ocean', 'fan', 'forest'];
 
-    // --- Audio engine ---
-    const audioCtx = new AudioContext();
-    const masterGain = audioCtx.createGain();
-    masterGain.gain.value = 0;
-    masterGain.connect(audioCtx.destination);
-
-    const gains = {}; // soundTypeId → GainNode
-    let lastSync = null; // last SYNC payload, used to init gains as sounds load
-
-    async function loadSounds() {
-      await Promise.all(SOUND_IDS.map(async (id) => {
-        try {
-          const res = await fetch(BASE_URL + id + '.mp3');
-          const ab = await res.arrayBuffer();
-          const buffer = await audioCtx.decodeAudioData(ab);
-
-          const gain = audioCtx.createGain();
-          // Apply volume from the last SYNC if it arrived before this sound loaded.
-          if (lastSync) {
-            const ch = lastSync.channels.find(c => c.soundTypeId === id);
-            gain.gain.value = ch ? (ch.muted ? 0 : ch.volume) : 0;
-          } else {
-            gain.gain.value = 0;
-          }
-          gain.connect(masterGain);
-          gains[id] = gain;
-
-          const source = audioCtx.createBufferSource();
-          source.buffer = buffer;
-          source.loop = true;
-          source.connect(gain);
-          source.start(0);
-        } catch (e) {
-          console.warn('Kon geluid niet laden:', id, e);
-        }
-      }));
-    }
-
-    // --- UI ---
-    const channelsEl = document.getElementById('channels');
     const statusEl = document.getElementById('status');
+    const channelsEl = document.getElementById('channels');
     const channelEls = {};
-
-    function renderChannels(channels) {
-      channelsEl.innerHTML = '';
-      for (const ch of channels) {
-        const el = document.createElement('div');
-        el.className = 'channel';
-        el.innerHTML = `
-          <div class="channel-bar"><div class="channel-fill" style="height:0%"></div></div>
-          <div class="channel-name">${ch.soundTypeId.replace('-', ' ')}</div>
-        `;
-        channelEls[ch.soundTypeId] = el;
-        channelsEl.appendChild(el);
-      }
-    }
-
-    function updateChannelUI(soundTypeId, effectiveVolume) {
-      const el = channelEls[soundTypeId];
-      if (!el) return;
-      el.classList.toggle('active', effectiveVolume > 0);
-      el.querySelector('.channel-fill').style.height = (effectiveVolume * 100) + '%';
-    }
-
-    // --- Message handlers ---
-    function handleSync(data) {
-      lastSync = data;
-      renderChannels(data.channels);
-      audioCtx.resume();
-      masterGain.gain.value = data.isPlaying ? 1 : 0;
-
-      for (const ch of data.channels) {
-        const vol = ch.muted ? 0 : ch.volume;
-        const gain = gains[ch.soundTypeId];
-        if (gain) gain.gain.value = vol;
-        updateChannelUI(ch.soundTypeId, vol);
-      }
-
-      statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
-    }
-
-    function handleVolume(data) {
-      const gain = gains[data.soundTypeId];
-      if (gain) gain.gain.value = data.effectiveVolume;
-      updateChannelUI(data.soundTypeId, data.effectiveVolume);
-    }
-
-    function handlePlayState(data) {
-      audioCtx.resume();
-      masterGain.gain.value = data.isPlaying ? 1 : 0;
-      statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
-    }
 
     function log(msg) {
       statusEl.textContent = msg;
       console.log('[NoiseMixer]', msg);
     }
 
-    // --- Cast SDK ---
-    const castContext = cast.framework.CastReceiverContext.getInstance();
+    // Wrap everything so a crash shows on screen instead of leaving a blank page
+    try {
+      // --- Audio engine ---
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const masterGain = audioCtx.createGain();
+      masterGain.gain.value = 0;
+      masterGain.connect(audioCtx.destination);
 
-    castContext.addEventListener(
-      cast.framework.system.EventType.SENDER_CONNECTED,
-      () => {
-        log('Sender verbonden — AudioContext resuming…');
-        audioCtx.resume().then(() => log('AudioContext actief. Wachten op SYNC…'));
+      const gains = {};
+      const sources = {};
+      const buffers = {};
+      let lastSync = null;
+
+      async function loadSound(id) {
+        if (buffers[id]) return; // already loaded
+        const res = await fetch(BASE_URL + id + '.mp3');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const ab = await res.arrayBuffer();
+        const buffer = await audioCtx.decodeAudioData(ab);
+
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0;
+        gain.connect(masterGain);
+        gains[id] = gain;
+        buffers[id] = buffer;
+
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+        source.connect(gain);
+        source.start(0);
+        sources[id] = source;
       }
-    );
 
-    castContext.addCustomMessageListener(NAMESPACE, (event) => {
-      const msg = event.data;
-      log(`Bericht: ${msg.type}`);
-      if (msg.type === 'SYNC') handleSync(msg);
-      else if (msg.type === 'VOLUME') handleVolume(msg);
-      else if (msg.type === 'PLAY_STATE') handlePlayState(msg);
-    });
+      // --- UI ---
+      function renderChannels(channels) {
+        channelsEl.innerHTML = '';
+        for (const ch of channels) {
+          const el = document.createElement('div');
+          el.className = 'channel';
+          el.innerHTML = `
+            <div class="channel-bar"><div class="channel-fill" style="height:0%"></div></div>
+            <div class="channel-name">${ch.soundTypeId.replace(/-/g, ' ')}</div>
+          `;
+          channelEls[ch.soundTypeId] = el;
+          channelsEl.appendChild(el);
+        }
+      }
 
-    // Start Cast receiver immediately, load sounds in parallel
-    castContext.start({ disableIdleTimeout: true });
-    log('Receiver gestart. Geluiden laden…');
-    loadSounds().then(() => log('Geluiden geladen. Wachten op verbinding…'));
+      function updateChannelUI(soundTypeId, vol) {
+        const el = channelEls[soundTypeId];
+        if (!el) return;
+        el.classList.toggle('active', vol > 0);
+        el.querySelector('.channel-fill').style.height = (vol * 100) + '%';
+      }
+
+      // --- Message handlers ---
+      async function handleSync(data) {
+        lastSync = data;
+        log(`SYNC: ${data.channels.length} kanalen, isPlaying=${data.isPlaying}`);
+        renderChannels(data.channels);
+
+        await audioCtx.resume();
+        masterGain.gain.value = data.isPlaying ? 1 : 0;
+
+        await Promise.all(data.channels.map(async (ch) => {
+          try {
+            await loadSound(ch.soundTypeId);
+          } catch (e) {
+            console.warn('Geluid niet beschikbaar:', ch.soundTypeId, e.message);
+          }
+          const vol = ch.muted ? 0 : ch.volume;
+          if (gains[ch.soundTypeId]) gains[ch.soundTypeId].gain.value = vol;
+          updateChannelUI(ch.soundTypeId, vol);
+        }));
+
+        statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
+      }
+
+      function handleVolume(data) {
+        if (gains[data.soundTypeId]) gains[data.soundTypeId].gain.value = data.effectiveVolume;
+        updateChannelUI(data.soundTypeId, data.effectiveVolume);
+      }
+
+      function handlePlayState(data) {
+        audioCtx.resume();
+        masterGain.gain.value = data.isPlaying ? 1 : 0;
+        statusEl.textContent = data.isPlaying ? 'Speelt af' : 'Gepauzeerd';
+      }
+
+      // --- Cast SDK ---
+      const castContext = cast.framework.CastReceiverContext.getInstance();
+
+      castContext.addEventListener(
+        cast.framework.system.EventType.SENDER_CONNECTED,
+        () => {
+          log('Sender verbonden, wachten op SYNC…');
+          audioCtx.resume();
+        }
+      );
+
+      castContext.addCustomMessageListener(NAMESPACE, (event) => {
+        const msg = event.data;
+        if (msg.type === 'SYNC') handleSync(msg);
+        else if (msg.type === 'VOLUME') handleVolume(msg);
+        else if (msg.type === 'PLAY_STATE') handlePlayState(msg);
+      });
+
+      castContext.start({ disableIdleTimeout: true });
+      log('Receiver actief. Wachten op verbinding…');
+
+    } catch (err) {
+      log('FOUT: ' + err.message);
+      console.error(err);
+    }
   </script>
 </body>
 </html>
